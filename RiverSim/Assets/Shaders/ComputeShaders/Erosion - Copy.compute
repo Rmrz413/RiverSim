@@ -1,0 +1,369 @@
+#pragma kernel RainAndControl
+#pragma kernel FluxComputation
+#pragma kernel FluxApply
+#pragma kernel HydraulicErosion
+#pragma kernel SedimentAdvection
+#pragma kernel ThermalErosion
+#pragma kernel ApplyThermalErosion
+#pragma kernel ApplyPerlin
+
+#define NUMTHREADS numthreads(8, 8, 1)
+
+// Directons
+#define LDIR(col) (col.r)
+#define RDIR(col) (col.g)
+#define TDIR(col) (col.b)
+#define BDIR(col) (col.a)
+
+// State map
+#define TERRAIN_HEIGHT(col) (col.r)
+#define WATER_HEIGHT(col) (col.g)
+#define SEDIMENT(col) (col.b)
+#define HARDNESS(col) (col.a)
+#define FULL_HEIGHT(col) ((TERRAIN_HEIGHT(col) + WATER_HEIGHT(col)))
+
+// Sampling
+#define SAMPLE_WITH_OFFSET(tex, x, y) ((tex[id.xy + uint2(x, y)]))
+#define CURRENT_SAMPLE(tex) (tex[id.xy])
+#define LEFT_SAMPLE(tex) (SAMPLE_WITH_OFFSET(tex, -1, 0))
+#define RIGHT_SAMPLE(tex) (SAMPLE_WITH_OFFSET(tex, 1, 0))
+#define TOP_SAMPLE(tex) (SAMPLE_WITH_OFFSET(tex, 0, 1))
+#define BOTTOM_SAMPLE(tex) (SAMPLE_WITH_OFFSET(tex, 0, -1))
+
+#define SUM_COMPS(v) ((v.r + v.g + v.b + v.a))
+
+// Heightmap (R - terrain height, G - water height, B - suspended sediment, A - resistance)
+RWTexture2D<float4> HeightMap;
+
+// Velocity field (R - velocity.x, G - velocity.y)
+RWTexture2D<float2> VelocityMap;
+
+// Flux field (R - left, G - right, B - top, A - bottom)
+RWTexture2D<float4> FluxMap;
+
+// Terrain Flux field (R - left, G - right, B - top, A - bottom)
+RWTexture2D<float4> TerrainFluxMap;
+
+float4 inputControls;
+
+// Fluid simulation properties
+uint width;
+uint height;
+float timeDelta;
+float pipeArea;
+float gravity;
+float pipeLength;
+float2 cellSize;
+float evaporation;
+float rainRate;
+
+// Hydraulic erosion properties
+float sedimentCapacity;
+float maxErosionDepth;
+float suspensionRate;
+float depositionRate; 
+float sedimentSofteningRate;
+
+// Thermal erosion properties
+float thermalErosionTimeScale;
+float thermalErosionRate;
+float talusAngleTangentCoeff;
+float talusAngleTangentBias;
+
+// Perlin Noise properties
+RWStructuredBuffer<float2> gradients;
+float frequency;
+float strength;
+float offset;
+
+float2 unity_gradientNoise_dir(float2 p);
+float unity_gradientNoise(float2 p);
+
+float4 SampleBilinear(RWTexture2D<float4> tex, float2 uv)
+{
+	float2 uva = floor(uv);
+	float2 uvb = ceil(uv);
+
+	uint2 id00 = (uint2)uva;  // 0 0
+	uint2 id10 = uint2(uvb.x, uva.y); // 1 0
+	uint2 id01 = uint2(uva.x, uvb.y); // 0 1	
+	uint2 id11 = (uint2)uvb; // 1 1
+
+	float2 d = uv - uva;
+
+	return
+	tex[id00] * (1 - d.x) * (1 - d.y) +
+	tex[id10] * d.x * (1 - d.y) +
+	tex[id01] * (1 - d.x) * d.y +
+	tex[id11] * d.x * d.y;
+}
+
+// Rain simulation and bucket tool
+[NUMTHREADS]
+void RainAndControl(uint3 id : SV_DispatchThreadID) 
+{	
+	float4 currentState = CURRENT_SAMPLE(HeightMap);	
+	WATER_HEIGHT(currentState) += timeDelta * rainRate;
+
+	// Water-drawing brush
+	float2 uv = float2((float)id.x / width, (float)id.y / height);
+	float2 dist = uv - inputControls.xy;
+	if (length(dist) < abs(inputControls.z))
+	{
+		WATER_HEIGHT(currentState) = max(0, WATER_HEIGHT(currentState) + inputControls.w * timeDelta);
+	}
+
+	CURRENT_SAMPLE(HeightMap) = currentState;
+}
+
+// Flux field computation
+[NUMTHREADS]
+void FluxComputation(uint3 id : SV_DispatchThreadID) 
+{
+	// This cell
+	float4 state = CURRENT_SAMPLE(HeightMap);
+    // The neighbours
+	float4 stateLeft = LEFT_SAMPLE(HeightMap);
+	float4 stateRight = RIGHT_SAMPLE(HeightMap);
+	float4 stateTop = TOP_SAMPLE(HeightMap);
+	float4 stateBottom = BOTTOM_SAMPLE(HeightMap);
+
+	float terrainHeight = TERRAIN_HEIGHT(state);
+	float waterHeight = WATER_HEIGHT(state);
+
+	// Flow simulation with shallow-water model. Velocity field and water height changes.
+	// Sample flux
+	float4 outputFlux = CURRENT_SAMPLE(FluxMap);
+
+	// Height difference in each direction
+	float4 heightDifference = FULL_HEIGHT(state) - 
+    float4
+    (
+		FULL_HEIGHT(stateLeft),
+		FULL_HEIGHT(stateRight),
+		FULL_HEIGHT(stateTop),
+		FULL_HEIGHT(stateBottom)
+    );
+
+
+	// Output flux	
+	outputFlux = max(0, outputFlux + timeDelta * gravity * pipeArea * heightDifference / pipeLength);
+	
+	outputFlux *= min(1, waterHeight * cellSize.x * cellSize.y / (SUM_COMPS(outputFlux) * timeDelta));
+
+	// Boundaries ("the map is in a box")
+	if (id.x == 0) LDIR(outputFlux) = 0;
+	if (id.y == 0) BDIR(outputFlux) = 0;
+	if (id.x == width - 1) RDIR(outputFlux) = 0;
+	if (id.y == height - 1) TDIR(outputFlux) = 0;	
+
+	// Write new flux to the FluxMap
+	CURRENT_SAMPLE(FluxMap) = max(0, outputFlux);
+}
+
+// Applying fluxes to the cells and changing water height
+[NUMTHREADS]
+void FluxApply(uint3 id : SV_DispatchThreadID)
+{
+	float4 state = CURRENT_SAMPLE(HeightMap);
+	float4 outputFlux = CURRENT_SAMPLE(FluxMap);
+	float4 inputFlux = float4
+    (
+		RDIR(LEFT_SAMPLE(FluxMap)),
+		LDIR(RIGHT_SAMPLE(FluxMap)),
+		BDIR(TOP_SAMPLE(FluxMap)),
+		TDIR(BOTTOM_SAMPLE(FluxMap))
+    );
+	float waterHeightBefore = WATER_HEIGHT(state);
+
+	// Water surface and velocity field update
+	float volumeDelta = SUM_COMPS(inputFlux) - SUM_COMPS(outputFlux);	
+
+	// Update water height in the current (x, y) cell
+	WATER_HEIGHT(state) += timeDelta * volumeDelta / (cellSize.x * cellSize.y);	
+
+	// Write new state to the HeightMap
+	CURRENT_SAMPLE(HeightMap) = state;
+
+	// Compute new velocity from flux
+	CURRENT_SAMPLE(VelocityMap) = float2
+    (
+		0.5 * (LDIR(inputFlux) - LDIR(outputFlux) + RDIR(outputFlux) - RDIR(inputFlux)),
+		0.5 * (BDIR(inputFlux) - BDIR(outputFlux) + TDIR(outputFlux) - TDIR(inputFlux))
+    );
+}
+
+// Terrain hydraulic erosion and deposition
+[NUMTHREADS]
+void HydraulicErosion(uint3 id : SV_DispatchThreadID)
+{	
+	// Sampling the heighmap (state map)
+	float4 state = CURRENT_SAMPLE(HeightMap);
+	float4 stateLeft = LEFT_SAMPLE(HeightMap);
+	float4 stateRight = RIGHT_SAMPLE(HeightMap);
+	float4 stateTop = TOP_SAMPLE(HeightMap);
+	float4 stateBottom = BOTTOM_SAMPLE(HeightMap);
+	float2 velocity = CURRENT_SAMPLE(VelocityMap);
+
+
+	// Tilt angle computation
+	float3 dhdx = float3(2 * cellSize.x, TERRAIN_HEIGHT(stateRight) - TERRAIN_HEIGHT(stateLeft), 0);
+	float3 dhdy = float3(0, TERRAIN_HEIGHT(stateTop) - TERRAIN_HEIGHT(stateBottom), 2 * cellSize.y);
+	float3 normal = cross(dhdx, dhdy);
+
+	float sinTiltAngle = abs(normal.y) / length(normal);
+	
+	// Erosion limiting factor
+	float lmax = saturate(1 - max(0, maxErosionDepth - WATER_HEIGHT(state)) / maxErosionDepth);
+	float sedimentTransportCapacity = sedimentCapacity * length(velocity) * min(sinTiltAngle, 0.05) * lmax;
+
+	if (SEDIMENT(state) < sedimentTransportCapacity)
+	{
+		float mod = timeDelta * suspensionRate * HARDNESS(state) * (sedimentTransportCapacity - SEDIMENT(state));		
+		TERRAIN_HEIGHT(state) -= mod;
+		SEDIMENT(state) += mod;
+		WATER_HEIGHT(state) += mod;
+	}
+	else
+	{
+		float mod = timeDelta * depositionRate * (SEDIMENT(state) - sedimentTransportCapacity);
+		TERRAIN_HEIGHT(state) += mod;
+		SEDIMENT(state) -= mod;
+		WATER_HEIGHT(state) -= mod;
+	}	
+
+	// Water evaporation.
+	WATER_HEIGHT(state) *= 1 - evaporation * timeDelta;
+	 
+	// Hardness update
+	HARDNESS(state) = HARDNESS(state) - timeDelta * sedimentSofteningRate * suspensionRate * (SEDIMENT(state) - sedimentTransportCapacity);
+	HARDNESS(state) = clamp(HARDNESS(state), 0.1, 1);
+
+	// Write heighmap
+	CURRENT_SAMPLE(HeightMap) = state;
+}
+
+// Terrain hydraulic erosion sediment advection
+[NUMTHREADS]
+void SedimentAdvection(uint3 id : SV_DispatchThreadID)
+{
+	float4 state = CURRENT_SAMPLE(HeightMap);
+	float2 velocity = CURRENT_SAMPLE(VelocityMap); 
+
+	// Sediment advection
+	SEDIMENT(state) = SEDIMENT(SampleBilinear(HeightMap, id.xy - velocity * timeDelta));
+
+	// Write heightmap
+	CURRENT_SAMPLE(HeightMap) = state;
+}
+
+// Terrain thermal erosion
+[NUMTHREADS]
+void ThermalErosion(uint3 id : SV_DispatchThreadID)
+{	
+	float4 state = CURRENT_SAMPLE(HeightMap);	
+
+	// Neighbors
+	float4 neighborHeights = float4(
+		TERRAIN_HEIGHT(LEFT_SAMPLE(HeightMap)),
+		TERRAIN_HEIGHT(RIGHT_SAMPLE(HeightMap)),
+		TERRAIN_HEIGHT(TOP_SAMPLE(HeightMap)),
+		TERRAIN_HEIGHT(BOTTOM_SAMPLE(HeightMap))
+	);
+
+	// Height difference in each direction
+	float4 heightDifference = max(0, TERRAIN_HEIGHT(state) - neighborHeights);
+	float maxHeightDifference = max(max(heightDifference.x, heightDifference.y), max(heightDifference.z, heightDifference.w));
+	
+    // Volume of the terrain that will be moved
+	float volumeToBeMoved = cellSize.x * cellSize.y * maxHeightDifference * 0.5 
+		* thermalErosionRate * HARDNESS(state);
+	
+	// Computing angles for every neighbor
+	float4 tanAngle = heightDifference / cellSize.x;	
+	
+	float treshold = HARDNESS(state) * talusAngleTangentCoeff + talusAngleTangentBias;
+	
+	// How much mass is transfered in each direction	
+	float4 k = 0;
+	
+	if (tanAngle.x > treshold)
+		k.x = heightDifference.x;
+
+	if (tanAngle.y > treshold)
+		k.y = heightDifference.y;
+
+	if (tanAngle.z > treshold)
+		k.z = heightDifference.z;
+
+	if (tanAngle.w > treshold)
+		k.w = heightDifference.w;	
+
+	// Output flux
+	float sumProportions = SUM_COMPS(k);
+	float4 outputFlux = 0;
+
+	if (sumProportions > 0)
+		outputFlux = volumeToBeMoved * k / sumProportions;
+		
+	// Boundaries					
+	if (id.x == 0) LDIR(outputFlux) = 0;
+	if (id.y == 0) BDIR(outputFlux) = 0;
+	if (id.x == width - 1) RDIR(outputFlux) = 0;
+	if (id.y == height - 1) TDIR(outputFlux) = 0;	
+
+	CURRENT_SAMPLE(TerrainFluxMap) = outputFlux;
+}
+
+// Apply thermal erosion
+[NUMTHREADS]
+void ApplyThermalErosion(uint3 id : SV_DispatchThreadID)
+{
+	float4 state = CURRENT_SAMPLE(HeightMap);
+	float4 outputFlux = CURRENT_SAMPLE(TerrainFluxMap);
+	float4 inputFlux = float4
+    (
+		RDIR(LEFT_SAMPLE(TerrainFluxMap)),
+		LDIR(RIGHT_SAMPLE(TerrainFluxMap)),
+		BDIR(TOP_SAMPLE(TerrainFluxMap)),
+		TDIR(BOTTOM_SAMPLE(TerrainFluxMap))
+    );	
+	
+	
+	float volumeDelta = SUM_COMPS(inputFlux) - SUM_COMPS(outputFlux);
+	
+	TERRAIN_HEIGHT(state) += min(1, timeDelta * thermalErosionTimeScale) * volumeDelta;
+
+	CURRENT_SAMPLE(HeightMap) = state;
+}
+
+//Apply Perlin Noise
+[NUMTHREADS]
+void ApplyPerlin(uint3 id : SV_DispatchThreadID)
+{
+	float4 state = CURRENT_SAMPLE(HeightMap);
+	WATER_HEIGHT(state) = 0.0;
+	TERRAIN_HEIGHT(state) = unity_gradientNoise((id.xy + offset) * frequency) * strength;
+	CURRENT_SAMPLE(HeightMap) = state;
+}
+
+float2 unity_gradientNoise_dir(float2 p)
+{
+    p = p % 256;
+    float x = (34 * p.x + 1) * p.x % 256 + p.y;
+    x = (34 * x + 1) * x % 256;
+    x = frac(x / 41) * 2 - 1;
+    return normalize(float2(x - floor(x + 0.5), abs(x) - 0.5));
+}
+
+float unity_gradientNoise(float2 p)
+{		
+    float2 ip = floor(p);
+    float2 fp = frac(p);	
+    float g00 = dot(unity_gradientNoise_dir(ip), fp);
+    float g01 = dot(unity_gradientNoise_dir(ip + float2(0, 1)), fp - float2(0, 1));
+    float g10 = dot(unity_gradientNoise_dir(ip + float2(1, 0)), fp - float2(1, 0));
+    float g11 = dot(unity_gradientNoise_dir(ip + float2(1, 1)), fp - float2(1, 1));
+    fp = fp * fp * fp * (fp * (fp * 6 - 15) + 10);
+    return lerp(lerp(g00, g01, fp.y), lerp(g10, g11, fp.y), fp.x);
+}
