@@ -4,5 +4,11 @@
 EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
-  m_Scenes: []
+  m_Scenes:
+  - enabled: 1
+    path: Assets/Scenes/MainMenu.unity
+    guid: 116f8009a55dfe044b42a649e75f81ea
+  - enabled: 1
+    path: Assets/Scenes/RiverSim.unity
+    guid: 1caa720f9b71ad245a9ef1c0ec6d48f3
   m_configObjects: {}

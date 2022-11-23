@@ -56,7 +56,7 @@
 				col.r = max(0, col.r * _Scale + _Bias);
 
 				// Water height
-				col.g = max(0, _SeaLevel - col.r);
+				col.g = max(0, _SeaLevel - col.r); //TODO relative level
 
 				// Suspended sediment
 				col.b = 0;

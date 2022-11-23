@@ -12,14 +12,12 @@ Shader "Custom/WaterShader"
     SubShader
     {
         Tags { "Queue"="Transparent"  "RenderType"="Transparent"  "IgnoreProjector"="True" }
-        LOD 200
+        LOD 300
 
         Pass
 		{
 			Tags {"LightMode" = "ForwardBase" "IgnoreProjector" = "True" }
-			//LOD 300
 			Blend SrcAlpha OneMinusSrcAlpha
-			//Zwrite Off
 
 			CGPROGRAM
 			#pragma vertex vert
@@ -27,9 +25,7 @@ Shader "Custom/WaterShader"
 			#include "UnityCG.cginc"
 			#include "Lighting.cginc"
 			#include "UnityPBSLighting.cginc"
-
-			// compile shader into multiple variants, with and without shadows
-			// (we don't care about any lightmaps yet, so skip these variants)
+			
 			#pragma multi_compile_fwdbase nolightmap nodirlightmap nodynlightmap novertexlight multi_compile_fog			
 			#include "AutoLight.cginc"
 
@@ -102,7 +98,8 @@ Shader "Custom/WaterShader"
 
 				float3 specularTint;
 				float oneMinusReflectivity;
-				albedo = DiffuseAndSpecularFromMetallic(
+				albedo = DiffuseAndSpecularFromMetallic
+				(
 					albedo, _Metallic, specularTint, oneMinusReflectivity
 				);
 
@@ -117,11 +114,13 @@ Shader "Custom/WaterShader"
 				Unity_GlossyEnvironmentData envData;
 				envData.roughness = 1 - _Smoothness;
 				envData.reflUVW = reflectionDir;
-				indirectLight.specular = Unity_GlossyEnvironment(
+				indirectLight.specular = Unity_GlossyEnvironment
+				(
 					UNITY_PASS_TEXCUBE(unity_SpecCube0), unity_SpecCube0_HDR, envData
 				);
 
-				half4 c = UNITY_BRDF_PBS(
+				half4 c = UNITY_BRDF_PBS
+				(
 					albedo, specularTint,
 					oneMinusReflectivity, _Smoothness,
 					normal, viewDir,
@@ -130,7 +129,8 @@ Shader "Custom/WaterShader"
 
 				float2 uv = i.screenPos.xy / i.screenPos.w;
 				#if UNITY_UV_STARTS_AT_TOP
-				if (_CameraDepthTexture_TexelSize.y < 0) {
+				if (_CameraDepthTexture_TexelSize.y < 0) 
+				{
 					uv.y = 1 - uv.y;
 				}
 				#endif

@@ -1,7 +1,14 @@
-using System;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
-using UnityEditor;
+
+public enum ToolType
+{
+    Fluid = 0,
+    Terrain = 1,
+    Hardness = 2,
+    Source = 3
+}
 
 public class Simulation : MonoBehaviour
 {
@@ -13,82 +20,9 @@ public class Simulation : MonoBehaviour
 
     public ComputeShader ErosionComputeShader;
 
-    [Serializable]    
-    public class SimulationSettings
-    {
-        [Header("Simulation settings")]
-
-        [Range(0f, 10f)]
-        public float TimeScale = 1f;
-
-        public float PipeLength = 1f / 256;
-        public Vector2 CellSize = new Vector2(1f / 256, 1f / 256);
-
-        [Range(0, 1f)]
-        public float RainRate = 0.015f;
-
-        [Range(0, 1f)]
-        public float Evaporation = 0.015f;
-
-        [Range(0.001f, 1000)]
-        public float PipeArea = 20;
-
-        [Range(0.1f, 20f)]
-        public float Gravity = 9.81f;
-
-        [Header("Hydraulic erosion")]
-        [Range(0.1f, 3f)]
-        public float SedimentCapacity = 1f;
-
-        [Range(0.1f, 2f)]
-        public float SoilSuspensionRate = 0.5f;
-
-        [Range(0.1f, 3f)]
-        public float SedimentDepositionRate = 1f;
-
-        [Range(0f, 10f)]
-        public float SedimentSofteningRate = 5f;
-
-        [Range(0f, 40f)]
-        public float MaximalErosionDepth = 10f;
-
-        [Header("Thermal erosion")]
-        [Range(0, 1000f)]
-        public float ThermalErosionTimeScale = 1f;
-
-        [Range(0, 10f)]
-        public float ThermalErosionRate = 0.15f;
-
-        [Range(0f, 10f)]
-        public float TalusAngleTangentCoeff = 0.8f;
-
-        [Range(0f, 10f)]
-        public float TalusAngleTangentBias = 0.1f;            
-    }
-
-    [Header("Simulation")]   
+    [Header("Simulation")]
     public SimulationSettings Settings;
-
-    [Header("Editor settings")]
-    [Range(0.0f,10.0f)]
-    public float Sensitivity = 1.5f;
-
-    [Range(0.0f,5.0f)]
-    public float Speed = 0.5f;
-
-    [Range(0.0f,1.0f)]
-    public float BucketAmount = 0.5f;
-
-    [Range(0.0f,0.1f)]
-    public float BuckerRadious = 0.05f;
-    
-    [Range(0.0f,0.03f)]
-    public float Frequency = 0.01f;
-
-    [Range(1.0f,100.0f)]
-    public float Strength = 50.0f;
-
-    public float Offset = 0.0f;
+    private SettingsManager settingsHolder;
 
     private int width, height;
     private RenderTexture stateTexture;
@@ -98,7 +32,7 @@ public class Simulation : MonoBehaviour
 
     private readonly string[] kernelNames = 
     {
-        "RainAndControl",
+        "Rain",
         "FluxComputation",
         "FluxApply",
         "HydraulicErosion",
@@ -114,27 +48,39 @@ public class Simulation : MonoBehaviour
     private const string StateTextureKey = "_StateTex";
 
     private InputMaster controls;
+    
+    public ToolType InputMode = 0;
     private bool rmbIsPressed;
     private bool lmbIsPressed;
     private Vector4 inputControls = new Vector4(0.0f, 0.0f, 0.0f, 0.0f);
     private Plane floor = new Plane(Vector3.up, Vector3.zero);
-
-
-    private bool paused = false;
+    private List<Vector4> SrcNDRain;
+    [SerializeField]private LineRenderer line;
 
     void Awake()    
     {        
-        controls = new InputMaster();        
+        settingsHolder = GameObject.FindObjectOfType<SettingsManager>();
+        if (settingsHolder != null && settingsHolder.Settings != null)
+        {
+            Debug.Log("Simulation Settings found, settings loaded.");            
+            Settings = settingsHolder.Settings;
+            if (settingsHolder.Map != null)
+            {
+                InitialState = settingsHolder.Map;
+            }
+        }
+        else
+        {
+            Debug.Log("Settings not found, loading default.");
+            Settings = new SimulationSettings();
+        }
+         
     }
 
     void Start()
     {
-        width = (int)Metrics.WorldSize.x;
-        height = (int)Metrics.WorldSize.z;
-        controls.Basic.RMB.performed += _ => rmbIsPressed = true;
-        controls.Basic.RMB.canceled += _ => rmbIsPressed = false;
-        controls.Basic.LMB.performed += _ => lmbIsPressed = true;
-        controls.Basic.LMB.canceled += _ => lmbIsPressed = false;
+        width = (int)Metrics.MapResolution.x;
+        height = (int)Metrics.MapResolution.z;        
         Initialize();
     }
 
@@ -142,24 +88,24 @@ public class Simulation : MonoBehaviour
     {
         Rotate();
         Move();
-        Draw();
+        Editor();
     }
 
     void FixedUpdate()
     {
-        if (!paused)
-        {
-            if (ErosionComputeShader != null)
+        if (ErosionComputeShader != null)
             {
                 if (Settings != null)
                 {
                     ErosionComputeShader.SetFloat("timeDelta", Time.fixedDeltaTime * Settings.TimeScale);
                     ErosionComputeShader.SetFloat("pipeArea", Settings.PipeArea);
                     ErosionComputeShader.SetFloat("gravity", Settings.Gravity);
-                    ErosionComputeShader.SetFloat("pipeLength", Settings.PipeLength);
-                    ErosionComputeShader.SetVector("cellSize", Settings.CellSize);
+                    ErosionComputeShader.SetFloat("pipeLength", Settings.PipeLength);                    
+                    ErosionComputeShader.SetFloat("cellSizeX", Settings.CellSizeX);
+                    ErosionComputeShader.SetFloat("cellSizeY", Settings.CellSizeY);
                     ErosionComputeShader.SetFloat("evaporation", Settings.Evaporation);
                     ErosionComputeShader.SetFloat("rainRate", Settings.RainRate);
+                    ErosionComputeShader.SetBool("bordered", Settings.Bordered);
 
                     ErosionComputeShader.SetFloat("sedimentCapacity", Settings.SedimentCapacity);
                     ErosionComputeShader.SetFloat("maxErosionDepth", Settings.MaximalErosionDepth);
@@ -170,19 +116,28 @@ public class Simulation : MonoBehaviour
                     ErosionComputeShader.SetFloat("thermalErosionRate", Settings.ThermalErosionRate);
                     ErosionComputeShader.SetFloat("talusAngleTangentCoeff", Settings.TalusAngleTangentCoeff);
                     ErosionComputeShader.SetFloat("talusAngleTangentBias", Settings.TalusAngleTangentBias);
-                    ErosionComputeShader.SetFloat("thermalErosionTimeScale", Settings.ThermalErosionTimeScale); 
+                    ErosionComputeShader.SetFloat("thermalErosionTimeScale", Settings.ThermalErosionTimeScale);
 
-                    ErosionComputeShader.SetVector("inputControls", inputControls);               
+                    ErosionComputeShader.SetInt("inputMode", (int)InputMode);
+                    ErosionComputeShader.SetVector("inputControls", inputControls);
                 }
 
                 foreach (var kernel in kernels)
-                {
+                {                    
                     ErosionComputeShader.Dispatch(kernel,
                         stateTexture.width / (int)threadsPerGroupX,
                         stateTexture.height / (int)threadsPerGroupY, 1);
+                }
+
+                foreach(var loc in SrcNDRain)
+                {
+                    ErosionComputeShader.SetInt("inputMode", 0);
+                    ErosionComputeShader.SetVector("inputControls", loc);
+                    ErosionComputeShader.Dispatch(7,
+                        stateTexture.width / (int)threadsPerGroupX,
+                        stateTexture.height / (int)threadsPerGroupY, 1);
                 }       
-            }
-        }        
+            }        
     }
 
     void Initialize()
@@ -215,27 +170,33 @@ public class Simulation : MonoBehaviour
             wrapMode = TextureWrapMode.Clamp
         };
 
+        InitHeightMap.SetTexture("_MainTex", InitialState);
         Graphics.Blit(InitialState, stateTexture, InitHeightMap);
+
+        SrcNDRain = new List<Vector4>(8);
 
         kernels = new int[kernelNames.Length];
         var i = 0;
         foreach (var kernelName in kernelNames)
         {
-            var kernel = ErosionComputeShader.FindKernel(kernelName);;
+            var kernel = ErosionComputeShader.FindKernel(kernelName);
             kernels[i++] = kernel;
-                
-            ErosionComputeShader.SetTexture(kernel, "HeightMap", stateTexture);
-            ErosionComputeShader.SetTexture(kernel, "VelocityMap", velocityTexture);
-            ErosionComputeShader.SetTexture(kernel, "FluxMap", waterFluxTexture);
-            ErosionComputeShader.SetTexture(kernel, "TerrainFluxMap", terrainFluxTexture);
+        }
+
+        for (int j = 0; j < 9; j++)
+        {
+            ErosionComputeShader.SetTexture(j, "HeightMap", stateTexture);
+            ErosionComputeShader.SetTexture(j, "VelocityMap", velocityTexture);
+            ErosionComputeShader.SetTexture(j, "FluxMap", waterFluxTexture);
+            ErosionComputeShader.SetTexture(j, "TerrainFluxMap", terrainFluxTexture);
         }
 
         ComputeBuffer gradients = new ComputeBuffer(256, sizeof(float) * 2);
 		gradients.SetData(Enumerable.Range(0, 256).Select((i) => GetRandomDirection()).ToArray());
         ErosionComputeShader.SetTexture(kernels.Length, "HeightMap", stateTexture);
-        ErosionComputeShader.SetFloat("frequency", Frequency); 
-        ErosionComputeShader.SetFloat("strength", Strength);
-        ErosionComputeShader.SetFloat("offset", Offset);
+        ErosionComputeShader.SetFloat("frequency", Settings.Frequency); 
+        ErosionComputeShader.SetFloat("strength", Settings.Scale);
+        ErosionComputeShader.SetFloat("offset", Settings.Offset);
         ErosionComputeShader.SetBuffer(kernels.Length, "gradients", gradients);
         gradients.Release();
             
@@ -251,11 +212,11 @@ public class Simulation : MonoBehaviour
 
     private void ApplyPerlin()
     {
-        ErosionComputeShader.SetFloat("frequency", Frequency); 
-        ErosionComputeShader.SetFloat("strength", Strength);
-        ErosionComputeShader.SetFloat("offset", Offset);
+        ErosionComputeShader.SetFloat("frequency", Settings.Frequency); 
+        ErosionComputeShader.SetFloat("strength", Settings.Scale);
+        ErosionComputeShader.SetFloat("offset", Settings.Offset);
 
-        ErosionComputeShader.Dispatch(kernels.Length,
+        ErosionComputeShader.Dispatch(8,
         stateTexture.width / (int)threadsPerGroupX,
         stateTexture.height / (int)threadsPerGroupY, 1);
     }
@@ -265,7 +226,7 @@ public class Simulation : MonoBehaviour
         if (rmbIsPressed)
         {
             Vector2 delta = controls.Basic.MouseDelta.ReadValue<Vector2>();
-            Camera.main.transform.localEulerAngles = Camera.main.transform.localEulerAngles + new Vector3(-delta.y, delta.x, 0.0f) * Time.deltaTime * Sensitivity;
+            Camera.main.transform.localEulerAngles = Camera.main.transform.localEulerAngles + new Vector3(-delta.y, delta.x, 0.0f) * Time.deltaTime * Settings.MouseSensitivity;
         }        
     }
 
@@ -273,57 +234,91 @@ public class Simulation : MonoBehaviour
     {
         Vector2 mouse = controls.Basic.MousePos.ReadValue<Vector2>();
         Vector2 move = controls.Basic.Movement.ReadValue<Vector2>();
-        Camera.main.transform.Translate(new Vector3(mouse.x * move.x, 0.0f, mouse.y * move.y) * Time.deltaTime * Speed);
+        Camera.main.transform.Translate(new Vector3(mouse.x * move.x, 0.0f, mouse.y * move.y) * Time.deltaTime * Settings.CameraSpeed);
     }
 
-    private void Draw()
+    private void Editor()
     {
-        var amount = 0f;
-        var brushX = 0f;
-        var brushZ = 0f;
+        Vector2 mousePos = controls.Basic.MousePos.ReadValue<Vector2>();
+        Ray inputRay = Camera.main.ScreenPointToRay(mousePos);
+        bool isOverUI = UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject();
 
-        if (lmbIsPressed)
+        if (floor.Raycast(inputRay, out var hit) && !isOverUI)
+        {
+            Vector3 location = inputRay.GetPoint(hit);
+
+            line.SetPosition(0, location);
+            line.SetPosition(1, location + Vector3.up * 100);            
+
+            if (lmbIsPressed && InputMode != ToolType.Source)
+            {
+                
+                float amount = Settings.ToolStrength;
+                float brushX = location.x / width;
+                float brushZ = location.z / height;
+
+                inputControls = new Vector4(brushX, brushZ, Settings.ToolRadious, amount);
+                ErosionComputeShader.SetVector("inputControls", inputControls);
+                ErosionComputeShader.SetInt("inputMode", (int)InputMode);
+                ErosionComputeShader.Dispatch(7,
+                stateTexture.width / (int)threadsPerGroupX,
+                stateTexture.height / (int)threadsPerGroupY, 1);
+            }
+        }        
+    }
+
+    private void SourceAndDrainAdd()
+    {
+        if (InputMode == ToolType.Source)
         {
             Vector2 mousePos = controls.Basic.MousePos.ReadValue<Vector2>();
-            Ray inputRay = Camera.main.ScreenPointToRay(mousePos);            
+            Ray inputRay = Camera.main.ScreenPointToRay(mousePos);
+            bool isOverUI = UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject();
 
-            if (floor.Raycast(inputRay, out var hit))
+            if (floor.Raycast(inputRay, out var hit) && !isOverUI)
             {
                 var location = inputRay.GetPoint(hit);
-                amount = BucketAmount;
-                brushX = location.x / width;
-                brushZ = location.z / height;                
+                float amount = Settings.ToolStrength;
+                float brushX = location.x / width;
+                float brushZ = location.z / height;
+
+                SrcNDRain.Add(new Vector4(brushX, brushZ, Settings.ToolRadious, amount));
             }
-            else
-            {
-                amount = 0f;
-            }            
         }
-
-        inputControls = new Vector4(brushX, brushZ, BuckerRadious, amount);
-        Shader.SetGlobalVector("inputControls", inputControls);
-    } 
-
-    private void OnGUI()
-    {
-        if (GUI.Button(new Rect(Screen.width - 100,0,100,50), "ApplyPerlin"))
-        {
-            ApplyPerlin();
-        }
-        if (GUI.Button(new Rect(0,0,30,30), "||"))
-        {
-            paused = !paused;
-        }
-    }    
+    }
 
     private void OnEnable()
-    {
-        controls.Enable();
+    {        
+        controls = GameObject.FindObjectOfType<InputManager>()?.Controls;
+        if (controls == null)
+        {
+            Debug.Log("InputManager not found, creating new Input.");
+            controls = new InputMaster();
+            controls.Enable();
+        }
+        controls.Basic.RMB.performed += _ => rmbIsPressed = true;
+        controls.Basic.RMB.canceled += _ => rmbIsPressed = false;
+        controls.Basic.LMB.performed += _ => lmbIsPressed = true;
+        controls.Basic.LMB.canceled += _ => lmbIsPressed = false;
+        controls.Basic.LMB.performed += _ => SourceAndDrainAdd();
+        controls.Basic.R.performed += _ => ApplyPerlin();
+
+        if (settingsHolder != null)
+            settingsHolder.OnSettingsChanged += (a,b) =>Settings = settingsHolder.Settings;   
     }
 
     private void OnDisable()
-    {
-        controls.Disable();
+    {        
+        controls.Basic.RMB.performed -= _ => rmbIsPressed = true;
+        controls.Basic.RMB.canceled -= _ => rmbIsPressed = false;
+        controls.Basic.LMB.performed -= _ => lmbIsPressed = true;
+        controls.Basic.LMB.canceled -= _ => lmbIsPressed = false;
+        controls.Basic.R.performed -= _ => ApplyPerlin();
+
+        if (GameObject.FindObjectOfType<InputManager>()?.Controls != controls) controls.Disable();        
+
+        if (settingsHolder != null)
+            settingsHolder.OnSettingsChanged -= (a,b) =>Settings = settingsHolder.Settings;        
     }
 
     private static Vector2 GetRandomDirection()

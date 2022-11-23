@@ -1,12 +1,13 @@
-#pragma kernel RainAndControl
+#pragma kernel Rain
 #pragma kernel FluxComputation
 #pragma kernel FluxApply
 #pragma kernel HydraulicErosion
 #pragma kernel SedimentAdvection
 #pragma kernel ThermalErosion
 #pragma kernel ApplyThermalErosion
+#pragma kernel EditorTool
 #pragma kernel ApplyPerlin
-
+//TODO remove RainAndControl
 #define NUMTHREADS numthreads(8, 8, 1)
 
 // Directons
@@ -44,6 +45,8 @@ RWTexture2D<float4> FluxMap;
 // Terrain Flux field (R - left, G - right, B - top, A - bottom)
 RWTexture2D<float4> TerrainFluxMap;
 
+// Tools
+uint inputMode;
 float4 inputControls;
 
 // Fluid simulation properties
@@ -53,9 +56,11 @@ float timeDelta;
 float pipeArea;
 float gravity;
 float pipeLength;
-float2 cellSize;
+float cellSizeX;
+float cellSizeY;
 float evaporation;
 float rainRate;
+bool bordered;
 
 // Hydraulic erosion properties
 float sedimentCapacity;
@@ -98,20 +103,34 @@ float4 SampleBilinear(RWTexture2D<float4> tex, float2 uv)
 	tex[id11] * d.x * d.y;
 }
 
-// Rain simulation and bucket tool
 [NUMTHREADS]
-void RainAndControl(uint3 id : SV_DispatchThreadID) 
-{	
-	float4 currentState = CURRENT_SAMPLE(HeightMap);	
-	WATER_HEIGHT(currentState) += timeDelta * rainRate;
-
-	// Water-drawing brush
+void EditorTool(uint3 id : SV_DispatchThreadID) 
+{
 	float2 uv = float2((float)id.x / width, (float)id.y / height);
 	float2 dist = uv - inputControls.xy;
+
 	if (length(dist) < abs(inputControls.z))
 	{
-		WATER_HEIGHT(currentState) = max(0, WATER_HEIGHT(currentState) + inputControls.w * timeDelta);
+		float4 currentState = CURRENT_SAMPLE(HeightMap);
+
+		if(inputMode == 0)
+			WATER_HEIGHT(currentState) = max(0, WATER_HEIGHT(currentState) + inputControls.w * timeDelta);		
+		else if (inputMode == 1)
+			TERRAIN_HEIGHT(currentState) = max(0, TERRAIN_HEIGHT(currentState) + inputControls.w * timeDelta);
+		else if (inputMode == 2)
+			HARDNESS(currentState) = clamp((HARDNESS(currentState) + inputControls.w * timeDelta),0.1,1);
+
+		CURRENT_SAMPLE(HeightMap) = currentState;
 	}
+
+	
+}
+
+[NUMTHREADS]
+void Rain(uint3 id : SV_DispatchThreadID) 
+{	
+	float4 currentState = CURRENT_SAMPLE(HeightMap);	
+	WATER_HEIGHT(currentState) += timeDelta * rainRate;	
 
 	CURRENT_SAMPLE(HeightMap) = currentState;
 }
@@ -149,13 +168,16 @@ void FluxComputation(uint3 id : SV_DispatchThreadID)
 	// Output flux	
 	outputFlux = max(0, outputFlux + timeDelta * gravity * pipeArea * heightDifference / pipeLength);
 	
-	outputFlux *= min(1, waterHeight * cellSize.x * cellSize.y / (SUM_COMPS(outputFlux) * timeDelta));
+	outputFlux *= min(1, waterHeight * cellSizeX * cellSizeY / (SUM_COMPS(outputFlux) * timeDelta));
 
 	// Boundaries ("the map is in a box")
-	if (id.x == 0) LDIR(outputFlux) = 0;
-	if (id.y == 0) BDIR(outputFlux) = 0;
-	if (id.x == width - 1) RDIR(outputFlux) = 0;
-	if (id.y == height - 1) TDIR(outputFlux) = 0;	
+	if (bordered)
+	{
+		if (id.x == 0) LDIR(outputFlux) = 0;
+		if (id.y == 0) BDIR(outputFlux) = 0;
+		if (id.x == width - 1) RDIR(outputFlux) = 0;
+		if (id.y == height - 1) TDIR(outputFlux) = 0;
+	}		
 
 	// Write new flux to the FluxMap
 	CURRENT_SAMPLE(FluxMap) = max(0, outputFlux);
@@ -180,7 +202,7 @@ void FluxApply(uint3 id : SV_DispatchThreadID)
 	float volumeDelta = SUM_COMPS(inputFlux) - SUM_COMPS(outputFlux);	
 
 	// Update water height in the current (x, y) cell
-	WATER_HEIGHT(state) += timeDelta * volumeDelta / (cellSize.x * cellSize.y);	
+	WATER_HEIGHT(state) += timeDelta * volumeDelta / (cellSizeX * cellSizeY);	
 
 	// Write new state to the HeightMap
 	CURRENT_SAMPLE(HeightMap) = state;
@@ -207,8 +229,8 @@ void HydraulicErosion(uint3 id : SV_DispatchThreadID)
 
 
 	// Tilt angle computation
-	float3 dhdx = float3(2 * cellSize.x, TERRAIN_HEIGHT(stateRight) - TERRAIN_HEIGHT(stateLeft), 0);
-	float3 dhdy = float3(0, TERRAIN_HEIGHT(stateTop) - TERRAIN_HEIGHT(stateBottom), 2 * cellSize.y);
+	float3 dhdx = float3(2 * cellSizeX, TERRAIN_HEIGHT(stateRight) - TERRAIN_HEIGHT(stateLeft), 0);
+	float3 dhdy = float3(0, TERRAIN_HEIGHT(stateTop) - TERRAIN_HEIGHT(stateBottom), 2 * cellSizeY);
 	float3 normal = cross(dhdx, dhdy);
 
 	float sinTiltAngle = abs(normal.y) / length(normal);
@@ -276,11 +298,11 @@ void ThermalErosion(uint3 id : SV_DispatchThreadID)
 	float maxHeightDifference = max(max(heightDifference.x, heightDifference.y), max(heightDifference.z, heightDifference.w));
 	
     // Volume of the terrain that will be moved
-	float volumeToBeMoved = cellSize.x * cellSize.y * maxHeightDifference * 0.5 
+	float volumeToBeMoved = cellSizeX * cellSizeY * maxHeightDifference * 0.5 
 		* thermalErosionRate * HARDNESS(state);
 	
 	// Computing angles for every neighbor
-	float4 tanAngle = heightDifference / cellSize.x;	
+	float4 tanAngle = heightDifference / cellSizeX;
 	
 	float treshold = HARDNESS(state) * talusAngleTangentCoeff + talusAngleTangentBias;
 	
@@ -342,8 +364,11 @@ void ApplyThermalErosion(uint3 id : SV_DispatchThreadID)
 void ApplyPerlin(uint3 id : SV_DispatchThreadID)
 {
 	float4 state = CURRENT_SAMPLE(HeightMap);
-	WATER_HEIGHT(state) = 0.0;
-	TERRAIN_HEIGHT(state) = unity_gradientNoise((id.xy + offset) * frequency) * strength;
+	float f = unity_gradientNoise((id.xy + offset) * frequency);
+	TERRAIN_HEIGHT(state) = f * strength;
+	WATER_HEIGHT(state) = 0;
+	SEDIMENT(state) = 0;
+	HARDNESS(state) = saturate(0.2 + f * 0.8);
 	CURRENT_SAMPLE(HeightMap) = state;
 }
 
