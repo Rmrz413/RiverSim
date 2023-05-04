@@ -1,0 +1,38 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b0368d76a9edbd3498cc44b1c7deea7f, type: 3}
+  m_Name: Default
+  m_EditorClassIdentifier: 
+  TimeScale: 1
+  PipeLength: 1
+  CellSize: {x: 1, y: 1}
+  RainRate: 0
+  Evaporation: 0
+  PipeArea: 5
+  Gravity: 9.81
+  Bordered: 1
+  SedimentCapacity: 0.1
+  SoilSuspensionRate: 0.8
+  SedimentDepositionRate: 0.8
+  SedimentSofteningRate: 5
+  MaximalErosionDepth: 1
+  ThermalErosionTimeScale: 1
+  ThermalErosionRate: 1
+  TalusAngleTangentCoeff: 0.6
+  TalusAngleTangentBias: 0.2
+  MouseSensitivity: 1.5
+  CameraSpeed: 0.5
+  BucketAmount: 0.5
+  BuckerRadious: 0.05
+  Frequency: 0.01
+  Strength: 50
+  Offset: 0
